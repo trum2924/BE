@@ -9,6 +9,7 @@ import com.sb.brothers.capstone.services.*;
 import com.sb.brothers.capstone.util.CustomErrorType;
 import com.sb.brothers.capstone.util.CustomStatus;
 import com.sb.brothers.capstone.util.ResData;
+import com.sb.brothers.capstone.util.StoreUtils;
 import org.jboss.logging.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/posts")
@@ -34,7 +36,7 @@ public class PostController {
     private UserService userService;
 
     @Autowired
-    private PostManagerService postManagerService;
+    private ConfigService configService;
 
     @Autowired
     private BookService bookService;
@@ -183,12 +185,17 @@ public class PostController {
     @PostMapping("/add")
     public ResponseEntity<?> createNewPost(Authentication auth, @RequestBody PostDto postDto) {
         logger.info("[API-Post] createNewPost - START");
+        Optional<User> opUser = userService.getUserById(auth.getName());
         if(tokenProvider.getRoles(auth).contains("ROLE_ADMIN") || tokenProvider.getRoles(auth).contains("ROLE_MANAGER_POST"))
+        {
             postDto.setStatus(CustomStatus.ADMIN_POST);
+            if(opUser.isPresent())
+                postDto.setAddress(opUser.get().getAddress());
+        }
         else postDto.setStatus(CustomStatus.USER_POST_IS_NOT_APPROVED);
         Post p = null;
         try{
-            User user = userService.getUserById(auth.getName()).get();
+            User user = opUser.get();
             if((user.getStatus()&CustomStatus.BLOCK_POST) == 0){
                 p = new Post();
                 postDto.convertPostDto(p);
@@ -229,6 +236,8 @@ public class PostController {
                 return new ResponseEntity(new CustomErrorType("Xóa bài đăng thất bại. Không thể tìm thấy bài đăng."),
                         HttpStatus.OK);
             }
+            if (checkManager(auth, post))
+                return new ResponseEntity<>(new CustomErrorType("Bạn không quản lý cửa hàng có bài viết này."), HttpStatus.OK);
             if(post.getStatus() == CustomStatus.ADMIN_POST || post.getStatus() == CustomStatus.USER_POST_IS_APPROVED || post.getStatus() == CustomStatus.USER_POST_IS_NOT_APPROVED) {
                 if (post.getUser().getId().equals(auth.getName()) || tokenProvider.getRoles(auth).contains("ROLE_ADMIN") || tokenProvider.getRoles(auth).contains("ROLE_MANAGER_POST")) {
                     //@TODO return book when delete post
@@ -265,6 +274,8 @@ public class PostController {
                 return new ResponseEntity(new CustomErrorType("Cập nhật bài đăng thất bại. Không thể tìm thấy bài đăng."),
                         HttpStatus.NOT_FOUND);
             }
+            if (checkManager(auth, currPost))
+                return new ResponseEntity<>(new CustomErrorType("Bạn không quản lý cửa hàng có bài viết này."), HttpStatus.OK);
             logger.info("Fetching & Updating Post with id: " + postDto.getId());
             try{
                 postDto.convertPostDto(currPost);
@@ -304,7 +315,7 @@ public class PostController {
                 }
                 else if(book.getQuantity() >= postDetail.getQuantity()) {
                     book.setQuantity(book.getQuantity() - postDetail.getQuantity());
-                    b.setPercent(postDto.getFee());
+                    b.setPercent(configService.getConfigurationByKey("discount").get().getValue());
                     b.setQuantity(0);
                     b.setInStock(postDetail.getQuantity());
                     bookService.updateBook(b);
@@ -370,11 +381,26 @@ public class PostController {
                     }
                 }
             }*/
+            if (checkManager(auth, currPost))
+                return new ResponseEntity<>(new CustomErrorType("Bạn không quản lý cửa hàng có bài viết này."), HttpStatus.OK);
             if (currPost.getStatus() == status){
                 return new ResponseEntity<>(new CustomErrorType("Trạng thái bài đăng không thay đổi."), HttpStatus.OK);
             }
             else if(currPost.getStatus() == CustomStatus.USER_POST_IS_NOT_APPROVED){
-                if(status == CustomStatus.USER_POST_IS_APPROVED || status == CustomStatus.USER_REQUEST_IS_DENY) {
+                if(status == CustomStatus.USER_POST_IS_APPROVED) {
+                    postService.updateStatus(id, status);
+                }
+                else if(status == CustomStatus.USER_REQUEST_IS_DENY){
+                    List<PostDetail> postDetails = postDetailService.findAllByPostId(currPost.getId());
+                    postDetailService.deleteAllByPostId(id);
+                    for(PostDetail postDetail : postDetails) {
+                        Optional<Book> book = bookService.getBookById(postDetail.getSublet());
+                        if(book.isPresent()){
+                            book.get().setQuantity(book.get().getQuantity() + postDetail.getQuantity());
+                            bookService.updateBook(book.get());
+                            bookService.removeBookById(postDetail.getBook().getId());
+                        }
+                    }
                     postService.updateStatus(id, status);
                 }
                 else throw new Exception("Không thể thay đổi trạng thái của bài đăng.");
@@ -393,18 +419,33 @@ public class PostController {
             return new ResponseEntity(new CustomErrorType("Xảy ra lỗi: "+ex.getMessage() +".\nNguyên nhân: " + ex.getCause()), HttpStatus.OK);
         }
         currPost.setStatus(status);   //set status post
-        ManagerPost managerPost = new ManagerPost();
+        /*ManagerPost managerPost = new ManagerPost();
         managerPost.setPost(currPost);
         managerPost.setUser(userService.getUserById(auth.getName()).get());
         managerPost.setContent(auth.getName() + " has changed post status with id is " + id+ "to "+(status == CustomStatus.USER_REQUEST_IS_DENY ? "Deny.": "Accept."));
         //currPost.setManager(userService.getUserById(auth.getName()).get());
-        postManagerService.save(managerPost);
+        postManagerService.save(managerPost);*/
         currPost.setModifiedDate(new Date());
         logger.info("Fetching & Change Post status with id: " + id);
         postService.updatePost(currPost);
         logger.info("Change post status with post id:"+ id);
         logger.info("[API-Post] changePostStatus - END");
         return new ResponseEntity<>(new CustomErrorType(true, "Cập nhật trạng thái thành công."), HttpStatus.OK);
+    }
+
+    private boolean checkManager(Authentication auth, Post currPost) {
+        int storeId = StoreUtils.findStoreIdByAddress(currPost.getAddress());
+        if(storeId == -1) return false;
+        Optional<User> user = userService.getUserById(auth.getName());
+        if(user.isPresent()){
+            if(user.get().getAddress() == null)
+                user.get().setAddress("");
+            if(!StoreUtils.findManagerByStoreId(storeId, auth.getName()) && currPost.getAddress().compareTo(user.get().getAddress()) != 0){
+                return false;
+            }
+            return true;
+        }
+        return false;
     }
 
     boolean isAnAdminBook(Book book){
