@@ -123,10 +123,11 @@ public class MemberAPI {
 
     int discountForPartner(Post post, List<PostDetail> postDetails){
         int discount = 0;
+        int totalQuantity = postDetails.stream().mapToInt(PostDetail::getQuantity).sum();
         for (PostDetail postDetail : postDetails){
             Book book = postDetail.getBook();
             if(!checkAccount(book.getId())) {
-                discount += (book.getPercent() * post.getFee() *postDetail.getQuantity()) /100;
+                discount += (book.getPercent() * post.getFee()/totalQuantity *postDetail.getQuantity()) /100;
                 updateBalance(book, discount);
                 Notification notification = new Notification();
                 notification.setUser(book.getUser());
@@ -217,7 +218,7 @@ public class MemberAPI {
             if(user.isPresent()){
                 if(user.get().getAddress() == null)
                     user.get().setAddress("");
-                else if(!StoreUtils.findManagerByStoreId(storeId, auth.getName()) && currPost.getAddress().compareTo(user.get().getAddress()) != 0){
+                if(!StoreUtils.findManagerByStoreId(storeId, auth.getName()) && currPost.getAddress().compareTo(user.get().getAddress()) != 0){
                     logger.info("[API-Member] changePostStatus - END");
                     return new ResponseEntity(new CustomErrorType("Bạn không phải quản lý của của hàng sách có bài đăng này."), HttpStatus.OK);
                 }
@@ -318,13 +319,8 @@ public class MemberAPI {
     int expired(Post post){
         long expiredDay = post.getCreatedDate().getTime() + post.getNoDays()*OrderDto.milisecondsPerDay;
         long currDay    = new Date().getTime();
-        List<PostDetail> postDetails = postDetailService.findAllByPostId(post.getId());
-        int noBooks = 0;
-        for(PostDetail pd: postDetails){
-            noBooks += pd.getQuantity();
-        }
         if(expiredDay < currDay){
-            return (int) ((post.getFee() * noBooks * (currDay-expiredDay)/OrderDto.milisecondsPerDay)/100);
+            return (int) ((post.getFee() * (currDay-expiredDay)/OrderDto.milisecondsPerDay)/100);
         }
         return 0;
     }
