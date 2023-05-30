@@ -1,6 +1,7 @@
 package com.sb.brothers.capstone.controller;
 
 import com.sb.brothers.capstone.configuration.jwt.TokenProvider;
+import com.sb.brothers.capstone.dto.DataDTO;
 import com.sb.brothers.capstone.dto.OrderDto;
 import com.sb.brothers.capstone.dto.PostDetailDto;
 import com.sb.brothers.capstone.dto.PostDto;
@@ -225,7 +226,7 @@ public class PostController {
                 postService.removePostById(p.getId());
             logger.error("Exception: " + ex.getMessage()+".\n" + ex.getCause());
             logger.info("[API-Post] createNewPost - END");
-            return new ResponseEntity(new CustomErrorType("Xảy ra lỗi: " + ex.getMessage() +"."), HttpStatus.OK);
+            return new ResponseEntity(new CustomErrorType(ex.getMessage()), HttpStatus.OK);
         }
         logger.info("[API-Post] createNewPost - SUCCESS");
         return new ResponseEntity(new CustomErrorType(true,"Tạo bài đăng thành công."), HttpStatus.CREATED);
@@ -244,8 +245,13 @@ public class PostController {
                 return new ResponseEntity(new CustomErrorType("Xóa bài đăng thất bại. Không thể tìm thấy bài đăng."),
                         HttpStatus.OK);
             }
-            if (!checkManager(auth, post))
-                return new ResponseEntity<>(new CustomErrorType("Bạn không quản lý cửa hàng có bài viết này."), HttpStatus.OK);
+            if(post.getUser().getId().compareTo(auth.getName()) != 0){
+                if(post.getUser().userIsManager()) {
+                    if(!checkManager(auth, post))
+                        return new ResponseEntity<>(new CustomErrorType("Bạn không phải quản lý cửa hàng có bài viết này."), HttpStatus.OK);
+                }
+                else return new ResponseEntity<>(new CustomErrorType("Bạn không phải người yêu cầu ký gửi."), HttpStatus.OK);
+            }
             if(post.getStatus() == CustomStatus.ADMIN_POST || post.getStatus() == CustomStatus.USER_POST_IS_APPROVED || post.getStatus() == CustomStatus.USER_POST_IS_NOT_APPROVED) {
                 if (post.getUser().getId().equals(auth.getName()) || tokenProvider.getRoles(auth).contains("ROLE_ADMIN") || tokenProvider.getRoles(auth).contains("ROLE_MANAGER_POST")) {
                     //@TODO return book when delete post
@@ -282,8 +288,13 @@ public class PostController {
                 return new ResponseEntity(new CustomErrorType("Cập nhật bài đăng thất bại. Không thể tìm thấy bài đăng."),
                         HttpStatus.NOT_FOUND);
             }
-            if (!checkManager(auth, currPost))
-                return new ResponseEntity<>(new CustomErrorType("Bạn không quản lý cửa hàng có bài viết này."), HttpStatus.OK);
+            if(currPost.getUser().getId().compareTo(auth.getName()) != 0){
+                if(currPost.getUser().userIsManager()) {
+                    if(!checkManager(auth, currPost))
+                        return new ResponseEntity<>(new CustomErrorType("Bạn không phải quản lý cửa hàng có bài viết này."), HttpStatus.OK);
+                }
+                else return new ResponseEntity<>(new CustomErrorType("Bạn không phải người yêu cầu ký gửi."), HttpStatus.OK);
+            }
             logger.info("Fetching & Updating Post with id: " + postDto.getId());
             try{
                 postDto.convertPostDto(currPost);
@@ -297,6 +308,7 @@ public class PostController {
             catch (Exception ex){
                 logger.error("Exception: " + ex.getMessage()+".\n" + ex.getCause());
                 logger.info("[API-Post] updatePost - END");
+                return new ResponseEntity<>(new CustomErrorType(ex.getMessage()), HttpStatus.OK);
             }
             logger.info("Update post with post id:"+ postDto.getId());
             logger.info("[API-Post] updatePost - SUCCESS");
@@ -318,6 +330,9 @@ public class PostController {
             postDetail.setBook(book);
             postDetail.setQuantity(pdDto.getQuantity());
             if(currPost.getStatus() == CustomStatus.USER_POST_IS_NOT_APPROVED){
+                List<Post> depositList = postService.getAllPostsByUserId(auth.getName()).stream().filter(post -> post.getId() != currPost.getId()).collect(Collectors.toList());
+                if(depositList.stream().anyMatch(deposit -> deposit.getStatus() == CustomStatus.USER_POST_IS_NOT_APPROVED))
+                    throw new Exception("Bạn còn đơn ký gửi trước đó chưa được chấp nhận.");
                 if(book.getUser().getId().compareTo(auth.getName()) != 0) {
                     throw new Exception("Bạn không sở hữu cuốn sách này.");
                 }
@@ -366,8 +381,11 @@ public class PostController {
 
     @PreAuthorize("hasRole('ROLE_MANAGER_POST')")
     @PutMapping("/deny-post/{id}")
-    public ResponseEntity<?> denyPost(Authentication auth, @PathVariable("id") int id){
-        return changePostStatus(auth, id, CustomStatus.USER_REQUEST_IS_DENY);
+    public ResponseEntity<?> denyPost(Authentication auth, @PathVariable("id") int id, @RequestBody DataDTO dataDto){
+        DataDTO dtos[] = new DataDTO[2];
+        dtos[0] = dataDto;
+        logger.info("DenyPost- START");
+        return changePostStatus(auth, id, CustomStatus.USER_REQUEST_IS_DENY, dtos);
     }//form edit post, fill old data into form
 
     @PreAuthorize("hasRole('ROLE_MANAGER_POST')")
@@ -376,7 +394,7 @@ public class PostController {
         return changePostStatus(auth, id, CustomStatus.RETURNED_THE_BOOK_TO_THE_USER);
     }//form edit post, fill old data into form
 
-    ResponseEntity<?> changePostStatus(Authentication auth, int id, int status){
+    ResponseEntity<?> changePostStatus(Authentication auth, int id, int status,DataDTO ... dtos){
         logger.info("[API-Post] changePostStatus - START");
         Post currPost = null;
         try{
@@ -393,7 +411,7 @@ public class PostController {
                 }
             }*/
             if (!checkManager(auth, currPost))
-                return new ResponseEntity<>(new CustomErrorType("Bạn không quản lý cửa hàng có bài viết này."), HttpStatus.OK);
+                return new ResponseEntity<>(new CustomErrorType("Bạn không phải quản lý cửa hàng có bài viết này."), HttpStatus.OK);
             if (currPost.getStatus() == status){
                 return new ResponseEntity<>(new CustomErrorType("Trạng thái bài đăng không thay đổi."), HttpStatus.OK);
             }
@@ -413,6 +431,12 @@ public class PostController {
                         }
                     }
                     postService.updateStatus(id, status);
+                    Optional<User> manager = userService.getUserById(auth.getName());
+                    DataDTO dataDto = dtos[0];
+                    Notification notify = new Notification();
+                    notify.setUser(currPost.getUser());
+                    notify.setDescription("Đơn ký gửi của bạn đã bị từ chối" + (manager.isPresent() ? (" bởi: " + manager.get().getFirstName() + " " + manager.get().getLastName()) : "") + ". Lý do: "+ dataDto.getValue());
+                    notificationService.updateNotification(notify);
                 }
                 else throw new Exception("Không thể thay đổi trạng thái của bài đăng.");
             }
